@@ -634,6 +634,7 @@ class TabManager: ObservableObject {
     weak var window: NSWindow?
 
     @Published var tabs: [Workspace] = []
+    @Published var folders: [TabFolder] = []
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -1447,6 +1448,51 @@ class TabManager: ObservableObject {
         tabs.insert(tab, at: insertIndex)
     }
 
+    // MARK: - Tab Folders
+
+    @discardableResult
+    func createFolder(name: String) -> TabFolder {
+        let folder = TabFolder(name: name)
+        folders.append(folder)
+        return folder
+    }
+
+    func deleteFolder(folderId: UUID) {
+        folders.removeAll { $0.id == folderId }
+    }
+
+    func renameFolder(folderId: UUID, name: String) {
+        guard let folder = folders.first(where: { $0.id == folderId }) else { return }
+        folder.name = name
+    }
+
+    func moveWorkspaceToFolder(workspaceId: UUID, folderId: UUID) {
+        // Remove from any existing folder first
+        for folder in folders {
+            folder.removeWorkspace(workspaceId)
+        }
+        guard let folder = folders.first(where: { $0.id == folderId }) else { return }
+        folder.addWorkspace(workspaceId)
+    }
+
+    func removeWorkspaceFromFolder(workspaceId: UUID) {
+        for folder in folders {
+            folder.removeWorkspace(workspaceId)
+        }
+    }
+
+    func folderForWorkspace(_ workspaceId: UUID) -> TabFolder? {
+        folders.first { $0.contains(workspaceId: workspaceId) }
+    }
+
+    /// Remove references to workspaces that no longer exist.
+    func pruneFolders() {
+        let validIds = Set(tabs.map(\.id))
+        for folder in folders {
+            folder.pruneStaleWorkspaces(validIds: validIds)
+        }
+    }
+
     // MARK: - Surface Directory Updates (Backwards Compatibility)
 
     func updateSurfaceDirectory(tabId: UUID, surfaceId: UUID, directory: String) {
@@ -1481,6 +1527,7 @@ class TabManager: ObservableObject {
         sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
         clearInitialWorkspaceGitProbe(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
+        removeWorkspaceFromFolder(workspaceId: workspace.id)
 
         AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
         unwireClosedBrowserTracking(for: workspace)
@@ -4150,9 +4197,21 @@ extension TabManager {
         let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
             tabs.firstIndex(where: { $0.id == selectedTabId })
         }
+        let folderSnapshots: [SessionTabFolderSnapshot] = folders.map { folder in
+            let workspaceIndices = folder.workspaceIds.compactMap { wsId in
+                tabs.firstIndex(where: { $0.id == wsId })
+            }
+            return SessionTabFolderSnapshot(
+                id: folder.id.uuidString,
+                name: folder.name,
+                isExpanded: folder.isExpanded,
+                workspaceIndices: workspaceIndices
+            )
+        }
         return SessionTabManagerSnapshot(
             selectedWorkspaceIndex: selectedWorkspaceIndex,
-            workspaces: workspaceSnapshots
+            workspaces: workspaceSnapshots,
+            folders: folderSnapshots.isEmpty ? nil : folderSnapshots
         )
     }
 
@@ -4212,9 +4271,28 @@ extension TabManager {
             newSelectedId = newTabs.first?.id
         }
 
+        // Restore folders from snapshot.
+        var restoredFolders: [TabFolder] = []
+        if let folderSnapshots = snapshot.folders {
+            for folderSnapshot in folderSnapshots {
+                let folderId = UUID(uuidString: folderSnapshot.id) ?? UUID()
+                let workspaceIds = folderSnapshot.workspaceIndices.compactMap { index in
+                    newTabs.indices.contains(index) ? newTabs[index].id : nil
+                }
+                let folder = TabFolder(
+                    id: folderId,
+                    name: folderSnapshot.name,
+                    isExpanded: folderSnapshot.isExpanded,
+                    workspaceIds: workspaceIds
+                )
+                restoredFolders.append(folder)
+            }
+        }
+
         // Single atomic assignment of @Published properties so SwiftUI observers
         // never see an intermediate state with empty tabs or nil selection.
         tabs = newTabs
+        folders = restoredFolders
         selectedTabId = newSelectedId
 
         if let selectedTabId {

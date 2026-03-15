@@ -7777,9 +7777,67 @@ struct VerticalTabsSidebar: View {
         )
     }
 
+    /// Items in a folder, ordered by the folder's workspaceIds list.
+    private func folderWorkspaces(for folder: TabFolder) -> [(index: Int, workspace: Workspace)] {
+        folder.workspaceIds.compactMap { wsId in
+            guard let globalIndex = tabManager.tabs.firstIndex(where: { $0.id == wsId }) else { return nil }
+            return (index: globalIndex, workspace: tabManager.tabs[globalIndex])
+        }
+    }
+
+    /// Workspace IDs that belong to any folder.
+    private var folderedWorkspaceIds: Set<UUID> {
+        Set(tabManager.folders.flatMap(\.workspaceIds))
+    }
+
+    /// Build a tab item view with all standard parameters.
+    @ViewBuilder
+    private func makeTabItemView(
+        tab: Workspace,
+        index: Int,
+        workspaceCount: Int,
+        canCloseWorkspace: Bool,
+        indented: Bool = false
+    ) -> some View {
+        TabItemView(
+            tabManager: tabManager,
+            notificationStore: notificationStore,
+            tab: tab,
+            index: index,
+            isActive: tabManager.selectedTabId == tab.id,
+            workspaceShortcutDigit: WorkspaceShortcutMapper.commandDigitForWorkspace(
+                at: index,
+                workspaceCount: workspaceCount
+            ),
+            canCloseWorkspace: canCloseWorkspace,
+            accessibilityWorkspaceCount: workspaceCount,
+            unreadCount: notificationStore.unreadCount(forTabId: tab.id),
+            latestNotificationText: {
+                guard showsSidebarNotificationMessage,
+                      let notification = notificationStore.latestNotification(forTabId: tab.id) else {
+                    return nil
+                }
+                let text = notification.body.isEmpty ? notification.title : notification.body
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }(),
+            rowSpacing: tabRowSpacing,
+            setSelectionToTabs: { selection = .tabs },
+            selectedTabIds: $selectedTabIds,
+            lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
+            showsModifierShortcutHints: modifierKeyMonitor.isModifierPressed,
+            dragAutoScrollController: dragAutoScrollController,
+            draggedTabId: $draggedTabId,
+            dropIndicator: $dropIndicator
+        )
+        .equatable()
+        .padding(.leading, indented ? 16 : 0)
+    }
+
     var body: some View {
         let workspaceCount = tabManager.tabs.count
         let canCloseWorkspace = workspaceCount > 1
+        let folderedIds = folderedWorkspaceIds
 
         VStack(spacing: 0) {
             GeometryReader { proxy in
@@ -7790,39 +7848,38 @@ struct VerticalTabsSidebar: View {
                             .frame(height: trafficLightPadding)
 
                         LazyVStack(spacing: tabRowSpacing) {
+                            // Unfiled tabs (not in any folder)
                             ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
-                                TabItemView(
+                                if !folderedIds.contains(tab.id) {
+                                    makeTabItemView(
+                                        tab: tab,
+                                        index: index,
+                                        workspaceCount: workspaceCount,
+                                        canCloseWorkspace: canCloseWorkspace
+                                    )
+                                }
+                            }
+
+                            // Folders
+                            ForEach(tabManager.folders) { folder in
+                                SidebarFolderHeaderView(
+                                    folder: folder,
                                     tabManager: tabManager,
-                                    notificationStore: notificationStore,
-                                    tab: tab,
-                                    index: index,
-                                    isActive: tabManager.selectedTabId == tab.id,
-                                    workspaceShortcutDigit: WorkspaceShortcutMapper.commandDigitForWorkspace(
-                                        at: index,
-                                        workspaceCount: workspaceCount
-                                    ),
-                                    canCloseWorkspace: canCloseWorkspace,
-                                    accessibilityWorkspaceCount: workspaceCount,
-                                    unreadCount: notificationStore.unreadCount(forTabId: tab.id),
-                                    latestNotificationText: {
-                                        guard showsSidebarNotificationMessage,
-                                              let notification = notificationStore.latestNotification(forTabId: tab.id) else {
-                                            return nil
-                                        }
-                                        let text = notification.body.isEmpty ? notification.title : notification.body
-                                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        return trimmed.isEmpty ? nil : trimmed
-                                    }(),
-                                    rowSpacing: tabRowSpacing,
-                                    setSelectionToTabs: { selection = .tabs },
-                                    selectedTabIds: $selectedTabIds,
-                                    lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
-                                    showsModifierShortcutHints: modifierKeyMonitor.isModifierPressed,
-                                    dragAutoScrollController: dragAutoScrollController,
-                                    draggedTabId: $draggedTabId,
-                                    dropIndicator: $dropIndicator
+                                    draggedTabId: $draggedTabId
                                 )
-                                .equatable()
+
+                                if folder.isExpanded {
+                                    let items = folderWorkspaces(for: folder)
+                                    ForEach(items, id: \.workspace.id) { item in
+                                        makeTabItemView(
+                                            tab: item.workspace,
+                                            index: item.index,
+                                            workspaceCount: workspaceCount,
+                                            canCloseWorkspace: canCloseWorkspace,
+                                            indented: true
+                                        )
+                                    }
+                                }
                             }
                         }
                         .padding(.vertical, 8)
@@ -9987,6 +10044,11 @@ private struct SidebarEmptyArea: View {
                         .offset(y: -(rowSpacing / 2))
                 }
             }
+            .contextMenu {
+                Button(String(localized: "contextMenu.newFolder", defaultValue: "New Folder")) {
+                    promptNewFolder()
+                }
+            }
     }
 
     private var shouldShowTopDropIndicator: Bool {
@@ -9996,6 +10058,25 @@ private struct SidebarEmptyArea: View {
         }
         guard indicator.edge == .bottom, let lastTabId = tabManager.tabs.last?.id else { return false }
         return indicator.tabId == lastTabId
+    }
+
+    private func promptNewFolder() {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "folder.create.title", defaultValue: "New Folder")
+        alert.informativeText = String(localized: "folder.create.message", defaultValue: "Enter a name for the folder:")
+        alert.addButton(withTitle: String(localized: "folder.create.ok", defaultValue: "Create"))
+        alert.addButton(withTitle: String(localized: "folder.create.cancel", defaultValue: "Cancel"))
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        input.stringValue = String(localized: "folder.create.defaultName", defaultValue: "New Folder")
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                tabManager.createFolder(name: name)
+            }
+        }
     }
 }
 
@@ -10740,6 +10821,36 @@ private struct TabItemView: View, Equatable {
         }
         .disabled(targetIds.isEmpty)
 
+        // Folder management
+        let currentFolder = tabManager.folderForWorkspace(tab.id)
+        Menu(String(localized: "contextMenu.moveToFolder", defaultValue: "Move to Folder")) {
+            Button(String(localized: "contextMenu.newFolder", defaultValue: "New Folder")) {
+                promptNewFolderAndMove(targetIds)
+            }
+
+            if currentFolder != nil {
+                Button(String(localized: "contextMenu.removeFromFolder", defaultValue: "Remove from Folder")) {
+                    for id in targetIds {
+                        tabManager.removeWorkspaceFromFolder(workspaceId: id)
+                    }
+                }
+            }
+
+            if !tabManager.folders.isEmpty {
+                Divider()
+            }
+
+            ForEach(tabManager.folders) { folder in
+                Button(folder.name) {
+                    for id in targetIds {
+                        tabManager.moveWorkspaceToFolder(workspaceId: id, folderId: folder.id)
+                    }
+                }
+                .disabled(currentFolder?.id == folder.id && targetIds.count == 1)
+            }
+        }
+        .disabled(targetIds.isEmpty)
+
         Divider()
 
         if let key = closeWorkspaceShortcut.keyEquivalent {
@@ -10781,6 +10892,28 @@ private struct TabItemView: View, Equatable {
             markTabsUnread(targetIds)
         }
         .disabled(!hasReadNotifications(in: targetIds))
+    }
+
+    private func promptNewFolderAndMove(_ workspaceIds: [UUID]) {
+        let alert = NSAlert()
+        alert.messageText = String(localized: "folder.create.title", defaultValue: "New Folder")
+        alert.informativeText = String(localized: "folder.create.message", defaultValue: "Enter a name for the folder:")
+        alert.addButton(withTitle: String(localized: "folder.create.ok", defaultValue: "Create"))
+        alert.addButton(withTitle: String(localized: "folder.create.cancel", defaultValue: "Cancel"))
+        let input = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        input.stringValue = String(localized: "folder.create.defaultName", defaultValue: "New Folder")
+        alert.accessoryView = input
+        alert.window.initialFirstResponder = input
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty {
+                let folder = tabManager.createFolder(name: name)
+                for id in workspaceIds {
+                    tabManager.moveWorkspaceToFolder(workspaceId: id, folderId: folder.id)
+                }
+            }
+        }
     }
 
     private var backgroundColor: Color {
@@ -11832,7 +11965,7 @@ private final class SidebarDragAutoScrollController: ObservableObject {
     }
 }
 
-private enum SidebarTabDragPayload {
+enum SidebarTabDragPayload {
     static let typeIdentifier = "com.cmux.sidebar-tab-reorder"
     static let dropContentType = UTType(exportedAs: typeIdentifier)
     static let dropContentTypes: [UTType] = [dropContentType]
