@@ -248,6 +248,7 @@ struct SessionPanelSnapshot: Codable, Sendable {
     var isPinned: Bool
     var isManuallyUnread: Bool
     var gitBranch: SessionGitBranchSnapshot?
+    var folderId: UUID?
     var listeningPorts: [Int]
     var ttyName: String?
     var terminal: SessionTerminalPanelSnapshot?
@@ -339,11 +340,19 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     var logEntries: [SessionLogEntrySnapshot]
     var progress: SessionProgressSnapshot?
     var gitBranch: SessionGitBranchSnapshot?
+    var folderId: UUID?
+}
+
+struct SessionWorkspaceFolderSnapshot: Codable, Sendable {
+    var id: UUID
+    var title: String
+    var isExpanded: Bool
 }
 
 struct SessionTabManagerSnapshot: Codable, Sendable {
     var selectedWorkspaceIndex: Int?
     var workspaces: [SessionWorkspaceSnapshot]
+    var folders: [SessionWorkspaceFolderSnapshot]?
 }
 
 struct SessionWindowSnapshot: Codable, Sendable {

@@ -621,6 +621,30 @@ fileprivate func cmuxVsyncIOSurfaceTimelineCallback(
     return kCVReturnSuccess
 }
 #endif
+struct WorkspaceFolder: Identifiable, Equatable {
+    let id: UUID
+    var title: String
+    var isExpanded: Bool
+}
+
+
+enum SidebarElement: Identifiable, Equatable {
+    case folder(WorkspaceFolder)
+    case tab(Workspace, Int)
+    var id: String {
+        switch self {
+        case .folder(let folder): return "folder-\(folder.id.uuidString)"
+        case .tab(let workspace, _): return "tab-\(workspace.id.uuidString)"
+        }
+    }
+    static func == (lhs: SidebarElement, rhs: SidebarElement) -> Bool {
+        switch (lhs, rhs) {
+        case (.folder(let f1), .folder(let f2)): return f1 == f2
+        case (.tab(let w1, let i1), .tab(let w2, let i2)): return w1.id == w2.id && i1 == i2
+        default: return false
+        }
+    }
+}
 
 @MainActor
 class TabManager: ObservableObject {
@@ -633,7 +657,31 @@ class TabManager: ObservableObject {
     /// Used to apply title updates to the correct window instead of NSApp.keyWindow.
     weak var window: NSWindow?
 
+    
+    @Published var folders: [WorkspaceFolder] = []
     @Published var tabs: [Workspace] = []
+    var sidebarElements: [SidebarElement] {
+        var elements: [SidebarElement] = []
+        var currentFolderId: UUID? = nil
+        var skipTabs = false
+        
+        for (index, tab) in tabs.enumerated() {
+            if tab.folderId != currentFolderId {
+                currentFolderId = tab.folderId
+                if let folderId = currentFolderId, let folder = folders.first(where: { $0.id == folderId }) {
+                    elements.append(.folder(folder))
+                    skipTabs = !folder.isExpanded
+                } else {
+                    skipTabs = false
+                }
+            }
+            if !skipTabs {
+                elements.append(.tab(tab, index))
+            }
+        }
+        return elements
+    }
+
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -1371,6 +1419,30 @@ class TabManager: ObservableObject {
         tabs.insert(tab, at: pinnedCount)
     }
 
+    func moveTabsToFolder(_ ids: Set<UUID>, folderId: UUID?) {
+        for id in ids {
+            if let tab = tabs.first(where: { $0.id == id }) {
+                tab.folderId = folderId
+            }
+        }
+        
+        var grouped: [UUID?: [Workspace]] = [:]
+        for tab in tabs {
+            grouped[tab.folderId, default: []].append(tab)
+        }
+        
+        var newTabs: [Workspace] = []
+        for folder in folders {
+            if let folderTabs = grouped[folder.id] {
+                newTabs.append(contentsOf: folderTabs)
+            }
+        }
+        if let ungrouped = grouped[nil] {
+            newTabs.append(contentsOf: ungrouped)
+        }
+        
+        tabs = newTabs
+    }
     func moveTabsToTop(_ tabIds: Set<UUID>) {
         guard !tabIds.isEmpty else { return }
         let selectedTabs = tabs.filter { tabIds.contains($0.id) }
@@ -1387,12 +1459,25 @@ class TabManager: ObservableObject {
     func reorderWorkspace(tabId: UUID, toIndex targetIndex: Int) -> Bool {
         guard let currentIndex = tabs.firstIndex(where: { $0.id == tabId }) else { return false }
         if tabs.count <= 1 { return true }
-
         let clamped = max(0, min(targetIndex, tabs.count - 1))
         if currentIndex == clamped { return true }
-
         let workspace = tabs.remove(at: currentIndex)
         tabs.insert(workspace, at: clamped)
+        if clamped > 0, clamped < tabs.count - 1 {
+            let prev = tabs[clamped - 1].folderId
+            let next = tabs[clamped + 1].folderId
+            if prev == next {
+                workspace.folderId = prev
+            } else if clamped > currentIndex {
+                workspace.folderId = prev
+            } else {
+                workspace.folderId = next
+            }
+        } else if clamped == 0 {
+            workspace.folderId = tabs.count > 1 ? tabs[1].folderId : nil
+        } else if clamped == tabs.count - 1 {
+            workspace.folderId = tabs.count > 1 ? tabs[clamped - 1].folderId : nil
+        }
         return true
     }
 
@@ -4152,7 +4237,8 @@ extension TabManager {
         }
         return SessionTabManagerSnapshot(
             selectedWorkspaceIndex: selectedWorkspaceIndex,
-            workspaces: workspaceSnapshots
+            workspaces: workspaceSnapshots,
+            folders: folders.map { SessionWorkspaceFolderSnapshot(id: $0.id, title: $0.title, isExpanded: $0.isExpanded) }
         )
     }
 
@@ -4177,6 +4263,7 @@ extension TabManager {
         // Build the new workspace list locally to avoid intermediate @Published
         // emissions (empty tabs, nil selectedTabId) that can leave SwiftUI's
         // mountedWorkspaceIds empty and cause a frozen blank launch state (#399).
+        folders = snapshot.folders?.map { WorkspaceFolder(id: $0.id, title: $0.title, isExpanded: $0.isExpanded) } ?? []
         var newTabs: [Workspace] = []
         let workspaceSnapshots = snapshot.workspaces
             .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)

@@ -3056,6 +3056,13 @@ struct ContentView: View {
                 .padding(.top, 40)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contextMenu {
+                Button("New Folder") {
+                    let folderId = UUID()
+                    let folder = WorkspaceFolder(id: folderId, title: "New Folder", isExpanded: true)
+                    tabManager.folders.append(folder)
+                }
+            }
         }
         .onExitCommand {
             dismissCommandPalette()
@@ -7790,7 +7797,11 @@ struct VerticalTabsSidebar: View {
                             .frame(height: trafficLightPadding)
 
                         LazyVStack(spacing: tabRowSpacing) {
-                            ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
+                            ForEach(tabManager.sidebarElements) { element in
+                                switch element {
+                                case .folder(let folder):
+                                    FolderHeaderView(folder: folder, tabManager: tabManager)
+                                case .tab(let tab, let index):
                                 TabItemView(
                                     tabManager: tabManager,
                                     notificationStore: notificationStore,
@@ -7818,11 +7829,13 @@ struct VerticalTabsSidebar: View {
                                     selectedTabIds: $selectedTabIds,
                                     lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                                     showsModifierShortcutHints: modifierKeyMonitor.isModifierPressed,
+                                    isIndented: tab.folderId != nil,
                                     dragAutoScrollController: dragAutoScrollController,
                                     draggedTabId: $draggedTabId,
                                     dropIndicator: $dropIndicator
                                 )
                                 .equatable()
+                                }
                             }
                         }
                         .padding(.vertical, 8)
@@ -7837,6 +7850,13 @@ struct VerticalTabsSidebar: View {
                             dropIndicator: $dropIndicator
                         )
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contextMenu {
+                Button("New Folder") {
+                    let folderId = UUID()
+                    let folder = WorkspaceFolder(id: folderId, title: "New Folder", isExpanded: true)
+                    tabManager.folders.append(folder)
+                }
+            }
                     }
                     .frame(minHeight: proxy.size.height, alignment: .top)
                 }
@@ -9960,6 +9980,13 @@ private struct SidebarEmptyArea: View {
         Color.clear
             .contentShape(Rectangle())
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .contextMenu {
+                Button("New Folder") {
+                    let folderId = UUID()
+                    let folder = WorkspaceFolder(id: folderId, title: "New Folder", isExpanded: true)
+                    tabManager.folders.append(folder)
+                }
+            }
             .onTapGesture(count: 2) {
                 tabManager.addWorkspace(placementOverride: .end)
                 if let selectedId = tabManager.selectedTabId {
@@ -10090,7 +10117,8 @@ private struct TabItemView: View, Equatable {
         lhs.unreadCount == rhs.unreadCount &&
         lhs.latestNotificationText == rhs.latestNotificationText &&
         lhs.rowSpacing == rhs.rowSpacing &&
-        lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints
+        lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints &&
+        lhs.isIndented == rhs.isIndented
     }
 
     // Use plain references instead of @EnvironmentObject to avoid subscribing
@@ -10112,6 +10140,7 @@ private struct TabItemView: View, Equatable {
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
     let showsModifierShortcutHints: Bool
+    let isIndented: Bool
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var draggedTabId: UUID?
     @Binding var dropIndicator: SidebarDropIndicator?
@@ -10335,7 +10364,8 @@ private struct TabItemView: View, Equatable {
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .monospacedDigit()
                             .foregroundColor(activePrimaryTextColor)
-                            .padding(.horizontal, 6)
+                            .padding(.leading, isIndented ? 20 : 6)
+                            .padding(.trailing, 6)
                             .padding(.vertical, 2)
                             .background(ShortcutHintPillBackground(emphasis: shortcutHintEmphasis))
                             .offset(
@@ -10533,7 +10563,8 @@ private struct TabItemView: View, Equatable {
                     }
                 }
         )
-        .padding(.horizontal, 6)
+        .padding(.leading, isIndented ? 20 : 6)
+        .padding(.trailing, 6)
         .background {
             GeometryReader { proxy in
                 Color.clear
@@ -10739,6 +10770,29 @@ private struct TabItemView: View, Equatable {
             }
         }
         .disabled(targetIds.isEmpty)
+        Menu("Move to Folder") {
+            Button("New Folder") {
+                let folderId = UUID()
+                let folder = WorkspaceFolder(id: folderId, title: "New Folder", isExpanded: true)
+                tabManager.folders.append(folder)
+                tabManager.moveTabsToFolder(Set(targetIds), folderId: folderId)
+                syncSelectionAfterMutation()
+            }
+            if !tabManager.folders.isEmpty {
+                Divider()
+                Button("Remove from Folder") {
+                    tabManager.moveTabsToFolder(Set(targetIds), folderId: nil)
+                    syncSelectionAfterMutation()
+                }
+                Divider()
+                ForEach(tabManager.folders) { folder in
+                    Button(folder.title) {
+                        tabManager.moveTabsToFolder(Set(targetIds), folderId: folder.id)
+                        syncSelectionAfterMutation()
+                    }
+                }
+            }
+        }
 
         Divider()
 
@@ -12821,5 +12875,75 @@ extension NSColor {
             return String(format: "#%02X%02X%02X%02X", redByte, greenByte, blueByte, alphaByte)
         }
         return String(format: "#%02X%02X%02X", redByte, greenByte, blueByte)
+    }
+}
+private struct FolderHeaderView: View {
+    let folder: WorkspaceFolder
+    @ObservedObject var tabManager: TabManager
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: {
+                if let index = tabManager.folders.firstIndex(where: { $0.id == folder.id }) {
+                    tabManager.folders[index].isExpanded.toggle()
+                }
+            }) {
+                Image(systemName: folder.isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(.secondary)
+                    .frame(width: 16, height: 16)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            Text(folder.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if let index = tabManager.folders.firstIndex(where: { $0.id == folder.id }) {
+                        tabManager.folders[index].isExpanded.toggle()
+                    }
+                }
+            Spacer()
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 8)
+        .padding(.top, 12)
+        .padding(.bottom, 4)
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button("Rename Folder") {
+                promptRenameFolder()
+            }
+            Button("Delete Folder") {
+                for tab in tabManager.tabs where tab.folderId == folder.id {
+                    tab.folderId = nil
+                }
+                tabManager.folders.removeAll { $0.id == folder.id }
+            }
+        }
+    }
+    private func promptRenameFolder() {
+        let alert = NSAlert()
+        alert.messageText = "Rename Folder"
+        alert.informativeText = "Enter a name for this folder."
+        let input = NSTextField(string: folder.title)
+        input.placeholderString = "Folder name"
+        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+        alert.accessoryView = input
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let alertWindow = alert.window
+        alertWindow.initialFirstResponder = input
+        DispatchQueue.main.async {
+            input.currentEditor()?.selectAll(nil)
+        }
+        let response = alert.runModal()
+        if response == .alertFirstButtonReturn {
+            let name = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty, let index = tabManager.folders.firstIndex(where: { $0.id == folder.id }) {
+                tabManager.folders[index].title = name
+            }
+        }
     }
 }
