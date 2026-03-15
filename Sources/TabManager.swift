@@ -622,6 +622,28 @@ fileprivate func cmuxVsyncIOSurfaceTimelineCallback(
 }
 #endif
 
+struct SidebarFolder: Identifiable, Equatable, Hashable, Sendable {
+    let id: UUID
+    var name: String
+    var isExpanded: Bool
+
+    init(id: UUID = UUID(), name: String, isExpanded: Bool = true) {
+        self.id = id
+        self.name = name
+        self.isExpanded = isExpanded
+    }
+
+    init(snapshot: SessionSidebarFolderSnapshot) {
+        self.id = snapshot.id
+        self.name = snapshot.name
+        self.isExpanded = snapshot.isExpanded
+    }
+
+    var sessionSnapshot: SessionSidebarFolderSnapshot {
+        SessionSidebarFolderSnapshot(id: id, name: name, isExpanded: isExpanded)
+    }
+}
+
 @MainActor
 class TabManager: ObservableObject {
     private struct InitialWorkspaceGitMetadataSnapshot: Equatable {
@@ -634,6 +656,7 @@ class TabManager: ObservableObject {
     weak var window: NSWindow?
 
     @Published var tabs: [Workspace] = []
+    @Published private(set) var sidebarFolders: [SidebarFolder] = []
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -741,6 +764,7 @@ class TabManager: ObservableObject {
     private var workspaceCycleCooldownTask: Task<Void, Never>?
     private var pendingWorkspaceUnfocusTarget: (tabId: UUID, panelId: UUID)?
     private var sidebarSelectedWorkspaceIds: Set<UUID> = []
+    private var sidebarFolderAssignmentByWorkspaceId: [UUID: UUID] = [:]
     var confirmCloseHandler: ((String, String, Bool) -> Bool)?
     private struct WorkspaceCreationSnapshot {
         let tabs: [Workspace]
@@ -872,6 +896,75 @@ class TabManager: ObservableObject {
     var selectedWorkspace: Workspace? {
         guard let selectedTabId else { return nil }
         return tabs.first(where: { $0.id == selectedTabId })
+    }
+
+    func sidebarFolder(for id: UUID) -> SidebarFolder? {
+        sidebarFolders.first(where: { $0.id == id })
+    }
+
+    func sidebarFolderId(forWorkspaceId workspaceId: UUID) -> UUID? {
+        sidebarFolderAssignmentByWorkspaceId[workspaceId]
+    }
+
+    func createSidebarFolder(named rawName: String) -> SidebarFolder? {
+        let name = sanitizedSidebarFolderName(rawName)
+        guard !name.isEmpty else { return nil }
+        let folder = SidebarFolder(name: name)
+        sidebarFolders.append(folder)
+        return folder
+    }
+
+    func renameSidebarFolder(id: UUID, to rawName: String) {
+        guard let index = sidebarFolders.firstIndex(where: { $0.id == id }) else { return }
+        let name = sanitizedSidebarFolderName(rawName)
+        guard !name.isEmpty else { return }
+        sidebarFolders[index].name = name
+    }
+
+    func toggleSidebarFolderExpansion(id: UUID) {
+        guard let index = sidebarFolders.firstIndex(where: { $0.id == id }) else { return }
+        sidebarFolders[index].isExpanded.toggle()
+    }
+
+    func setSidebarFolderExpanded(_ isExpanded: Bool, id: UUID) {
+        guard let index = sidebarFolders.firstIndex(where: { $0.id == id }) else { return }
+        sidebarFolders[index].isExpanded = isExpanded
+    }
+
+    func removeSidebarFolder(id: UUID) {
+        guard sidebarFolders.contains(where: { $0.id == id }) else { return }
+        sidebarFolders.removeAll { $0.id == id }
+        sidebarFolderAssignmentByWorkspaceId = sidebarFolderAssignmentByWorkspaceId.filter { $0.value != id }
+    }
+
+    func assignWorkspace(_ workspaceId: UUID, toSidebarFolder folderId: UUID?) {
+        guard tabs.contains(where: { $0.id == workspaceId }) else { return }
+        if let folderId {
+            guard sidebarFolders.contains(where: { $0.id == folderId }) else { return }
+            sidebarFolderAssignmentByWorkspaceId[workspaceId] = folderId
+        } else {
+            sidebarFolderAssignmentByWorkspaceId.removeValue(forKey: workspaceId)
+        }
+    }
+
+    @discardableResult
+    func moveWorkspace(tabId: UUID, toIndex targetIndex: Int, folderId: UUID?) -> Bool {
+        guard reorderWorkspace(tabId: tabId, toIndex: targetIndex) else { return false }
+        assignWorkspace(tabId, toSidebarFolder: folderId)
+        return true
+    }
+
+    func lastWorkspaceIndex(inSidebarFolder folderId: UUID) -> Int? {
+        let assignedIds = Set(
+            sidebarFolderAssignmentByWorkspaceId.compactMap { workspaceId, assignedFolderId in
+                assignedFolderId == folderId ? workspaceId : nil
+            }
+        )
+        return tabs.lastIndex(where: { assignedIds.contains($0.id) })
+    }
+
+    private func sanitizedSidebarFolderName(_ rawName: String) -> String {
+        rawName.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     // Keep selectedTab as convenience alias
@@ -1481,6 +1574,7 @@ class TabManager: ObservableObject {
         sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
         clearInitialWorkspaceGitProbe(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
+        sidebarFolderAssignmentByWorkspaceId.removeValue(forKey: workspace.id)
 
         AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
         unwireClosedBrowserTracking(for: workspace)
@@ -1505,6 +1599,7 @@ class TabManager: ObservableObject {
         guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return nil }
         clearInitialWorkspaceGitProbe(workspaceId: tabId)
         sidebarSelectedWorkspaceIds.remove(tabId)
+        sidebarFolderAssignmentByWorkspaceId.removeValue(forKey: tabId)
 
         let removed = tabs.remove(at: index)
         unwireClosedBrowserTracking(for: removed)
@@ -1529,6 +1624,7 @@ class TabManager: ObservableObject {
     func attachWorkspace(_ workspace: Workspace, at index: Int? = nil, select: Bool = true) {
         workspace.owningTabManager = self
         wireClosedBrowserTracking(for: workspace)
+        sidebarFolderAssignmentByWorkspaceId.removeValue(forKey: workspace.id)
         let insertIndex: Int = {
             guard let index else { return tabs.count }
             return max(0, min(index, tabs.count))
@@ -4106,6 +4202,7 @@ extension TabManager {
         var hasher = Hasher()
         hasher.combine(selectedTabId)
         hasher.combine(tabs.count)
+        hasher.combine(sidebarFolders.count)
 
         for workspace in tabs.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow) {
             hasher.combine(workspace.id)
@@ -4138,6 +4235,14 @@ extension TabManager {
                 hasher.combine("")
                 hasher.combine(false)
             }
+
+            hasher.combine(sidebarFolderAssignmentByWorkspaceId[workspace.id])
+        }
+
+        for folder in sidebarFolders {
+            hasher.combine(folder.id)
+            hasher.combine(folder.name)
+            hasher.combine(folder.isExpanded)
         }
 
         return hasher.finalize()
@@ -4147,12 +4252,27 @@ extension TabManager {
         let workspaceSnapshots = tabs
             .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
             .map { $0.sessionSnapshot(includeScrollback: includeScrollback) }
+        let limitedTabs = Array(tabs.prefix(SessionPersistencePolicy.maxWorkspacesPerWindow))
+        let validFolderIds = Set(sidebarFolders.map(\.id))
+        let workspaceFolderAssignments: [SessionWorkspaceFolderAssignmentSnapshot] = limitedTabs.enumerated().compactMap { entry in
+            let (index, workspace) = entry
+            guard let folderId = sidebarFolderAssignmentByWorkspaceId[workspace.id],
+                  validFolderIds.contains(folderId) else {
+                return nil
+            }
+            return SessionWorkspaceFolderAssignmentSnapshot(
+                workspaceIndex: index,
+                folderId: folderId
+            )
+        }
         let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
             tabs.firstIndex(where: { $0.id == selectedTabId })
         }
         return SessionTabManagerSnapshot(
             selectedWorkspaceIndex: selectedWorkspaceIndex,
-            workspaces: workspaceSnapshots
+            workspaces: workspaceSnapshots,
+            sidebarFolders: sidebarFolders.map(\.sessionSnapshot),
+            workspaceFolderAssignments: workspaceFolderAssignments
         )
     }
 
@@ -4168,6 +4288,7 @@ extension TabManager {
         historyIndex = -1
         isNavigatingHistory = false
         pendingWorkspaceUnfocusTarget = nil
+        sidebarFolderAssignmentByWorkspaceId.removeAll()
         workspaceCycleCooldownTask?.cancel()
         workspaceCycleCooldownTask = nil
         isWorkspaceCycleHot = false
@@ -4212,8 +4333,21 @@ extension TabManager {
             newSelectedId = newTabs.first?.id
         }
 
+        let restoredFolders = snapshot.sidebarFolders.map(SidebarFolder.init(snapshot:))
+        let validFolderIds = Set(restoredFolders.map(\.id))
+        var restoredAssignments: [UUID: UUID] = [:]
+        for assignment in snapshot.workspaceFolderAssignments {
+            guard newTabs.indices.contains(assignment.workspaceIndex),
+                  validFolderIds.contains(assignment.folderId) else {
+                continue
+            }
+            restoredAssignments[newTabs[assignment.workspaceIndex].id] = assignment.folderId
+        }
+
         // Single atomic assignment of @Published properties so SwiftUI observers
         // never see an intermediate state with empty tabs or nil selection.
+        sidebarFolders = restoredFolders
+        sidebarFolderAssignmentByWorkspaceId = restoredAssignments
         tabs = newTabs
         selectedTabId = newSelectedId
 

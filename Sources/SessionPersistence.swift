@@ -341,9 +341,60 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     var gitBranch: SessionGitBranchSnapshot?
 }
 
+struct SessionSidebarFolderSnapshot: Codable, Sendable {
+    var id: UUID
+    var name: String
+    var isExpanded: Bool
+}
+
+struct SessionWorkspaceFolderAssignmentSnapshot: Codable, Sendable {
+    var workspaceIndex: Int
+    var folderId: UUID
+}
+
 struct SessionTabManagerSnapshot: Codable, Sendable {
     var selectedWorkspaceIndex: Int?
     var workspaces: [SessionWorkspaceSnapshot]
+    var sidebarFolders: [SessionSidebarFolderSnapshot]
+    var workspaceFolderAssignments: [SessionWorkspaceFolderAssignmentSnapshot]
+
+    init(
+        selectedWorkspaceIndex: Int?,
+        workspaces: [SessionWorkspaceSnapshot],
+        sidebarFolders: [SessionSidebarFolderSnapshot] = [],
+        workspaceFolderAssignments: [SessionWorkspaceFolderAssignmentSnapshot] = []
+    ) {
+        self.selectedWorkspaceIndex = selectedWorkspaceIndex
+        self.workspaces = workspaces
+        self.sidebarFolders = sidebarFolders
+        self.workspaceFolderAssignments = workspaceFolderAssignments
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selectedWorkspaceIndex
+        case workspaces
+        case sidebarFolders
+        case workspaceFolderAssignments
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        selectedWorkspaceIndex = try container.decodeIfPresent(Int.self, forKey: .selectedWorkspaceIndex)
+        workspaces = try container.decode([SessionWorkspaceSnapshot].self, forKey: .workspaces)
+        sidebarFolders = try container.decodeIfPresent([SessionSidebarFolderSnapshot].self, forKey: .sidebarFolders) ?? []
+        workspaceFolderAssignments = try container.decodeIfPresent(
+            [SessionWorkspaceFolderAssignmentSnapshot].self,
+            forKey: .workspaceFolderAssignments
+        ) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(selectedWorkspaceIndex, forKey: .selectedWorkspaceIndex)
+        try container.encode(workspaces, forKey: .workspaces)
+        try container.encode(sidebarFolders, forKey: .sidebarFolders)
+        try container.encode(workspaceFolderAssignments, forKey: .workspaceFolderAssignments)
+    }
 }
 
 struct SessionWindowSnapshot: Codable, Sendable {
