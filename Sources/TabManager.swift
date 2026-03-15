@@ -634,6 +634,8 @@ class TabManager: ObservableObject {
     weak var window: NSWindow?
 
     @Published var tabs: [Workspace] = []
+    /// Named groups of workspaces shown in the sidebar.
+    @Published var folders: [TabFolder] = []
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -1410,6 +1412,48 @@ class TabManager: ObservableObject {
         return false
     }
 
+    // MARK: - Folder Management
+
+    /// Returns the folder that contains `tabId`, or nil if the tab is not in any folder.
+    func folderForTab(_ tabId: UUID) -> TabFolder? {
+        folders.first { $0.tabIds.contains(tabId) }
+    }
+
+    /// Creates a new empty folder with the given name and appends it to the folder list.
+    @discardableResult
+    func createFolder(name: String) -> TabFolder {
+        let folder = TabFolder(name: name)
+        folders.append(folder)
+        return folder
+    }
+
+    /// Deletes a folder and removes all tab assignments from it.
+    /// Tabs themselves are not closed.
+    func deleteFolder(_ folderId: UUID) {
+        if let folder = folders.first(where: { $0.id == folderId }) {
+            folder.tabIds.removeAll()
+        }
+        folders.removeAll { $0.id == folderId }
+    }
+
+    /// Renames a folder.
+    func renameFolder(_ folderId: UUID, name: String) {
+        folders.first(where: { $0.id == folderId })?.name = name
+    }
+
+    /// Assigns a tab to a folder, removing it from any other folder first.
+    func addTab(_ tabId: UUID, toFolder folderId: UUID) {
+        removeTabFromFolder(tabId)
+        folders.first(where: { $0.id == folderId })?.tabIds.append(tabId)
+    }
+
+    /// Removes a tab from whichever folder it belongs to.
+    func removeTabFromFolder(_ tabId: UUID) {
+        for folder in folders {
+            folder.tabIds.removeAll { $0 == tabId }
+        }
+    }
+
     func setCustomTitle(tabId: UUID, title: String?) {
         guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         tabs[index].setCustomTitle(title)
@@ -1481,6 +1525,7 @@ class TabManager: ObservableObject {
         sentryBreadcrumb("workspace.close", data: ["tabCount": tabs.count - 1])
         clearInitialWorkspaceGitProbe(workspaceId: workspace.id)
         sidebarSelectedWorkspaceIds.remove(workspace.id)
+        removeTabFromFolder(workspace.id)
 
         AppDelegate.shared?.notificationStore?.clearNotifications(forTabId: workspace.id)
         unwireClosedBrowserTracking(for: workspace)
@@ -4150,9 +4195,18 @@ extension TabManager {
         let selectedWorkspaceIndex = selectedTabId.flatMap { selectedTabId in
             tabs.firstIndex(where: { $0.id == selectedTabId })
         }
+        let folderSnapshots = folders.map { folder in
+            SessionTabFolderSnapshot(
+                id: folder.id,
+                name: folder.name,
+                isExpanded: folder.isExpanded,
+                tabIds: folder.tabIds
+            )
+        }
         return SessionTabManagerSnapshot(
             selectedWorkspaceIndex: selectedWorkspaceIndex,
-            workspaces: workspaceSnapshots
+            workspaces: workspaceSnapshots,
+            folders: folderSnapshots
         )
     }
 
@@ -4212,9 +4266,21 @@ extension TabManager {
             newSelectedId = newTabs.first?.id
         }
 
+        // Restore folders, filtering out any tab IDs that no longer exist.
+        let validTabIds = Set(newTabs.map(\.id))
+        let newFolders: [TabFolder] = snapshot.folders.map { folderSnapshot in
+            TabFolder(
+                id: folderSnapshot.id,
+                name: folderSnapshot.name,
+                isExpanded: folderSnapshot.isExpanded,
+                tabIds: folderSnapshot.tabIds.filter { validTabIds.contains($0) }
+            )
+        }
+
         // Single atomic assignment of @Published properties so SwiftUI observers
         // never see an intermediate state with empty tabs or nil selection.
         tabs = newTabs
+        folders = newFolders
         selectedTabId = newSelectedId
 
         if let selectedTabId {

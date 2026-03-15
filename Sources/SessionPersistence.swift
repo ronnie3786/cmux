@@ -341,9 +341,31 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     var gitBranch: SessionGitBranchSnapshot?
 }
 
+struct SessionTabFolderSnapshot: Codable, Sendable {
+    var id: UUID
+    var name: String
+    var isExpanded: Bool
+    var tabIds: [UUID]
+}
+
 struct SessionTabManagerSnapshot: Codable, Sendable {
     var selectedWorkspaceIndex: Int?
     var workspaces: [SessionWorkspaceSnapshot]
+    var folders: [SessionTabFolderSnapshot]
+
+    init(selectedWorkspaceIndex: Int?, workspaces: [SessionWorkspaceSnapshot], folders: [SessionTabFolderSnapshot] = []) {
+        self.selectedWorkspaceIndex = selectedWorkspaceIndex
+        self.workspaces = workspaces
+        self.folders = folders
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.selectedWorkspaceIndex = try container.decodeIfPresent(Int.self, forKey: .selectedWorkspaceIndex)
+        self.workspaces = try container.decode([SessionWorkspaceSnapshot].self, forKey: .workspaces)
+        // Graceful default for sessions saved before folder support was added.
+        self.folders = try container.decodeIfPresent([SessionTabFolderSnapshot].self, forKey: .folders) ?? []
+    }
 }
 
 struct SessionWindowSnapshot: Codable, Sendable {
