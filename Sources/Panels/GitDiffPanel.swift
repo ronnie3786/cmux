@@ -7,6 +7,15 @@ struct GitChangedFile: Identifiable, Hashable {
     let path: String
     let status: GitFileStatus
     let staged: Bool
+    let oldPath: String?
+
+    init(id: String, path: String, status: GitFileStatus, staged: Bool, oldPath: String? = nil) {
+        self.id = id
+        self.path = path
+        self.status = status
+        self.staged = staged
+        self.oldPath = oldPath
+    }
 }
 
 enum GitFileStatus: String {
@@ -16,6 +25,7 @@ enum GitFileStatus: String {
     case renamed = "R"
     case copied = "C"
     case untracked = "?"
+    case conflicted = "U"
 
     var symbolName: String {
         switch self {
@@ -31,6 +41,8 @@ enum GitFileStatus: String {
             return "doc.on.doc.fill"
         case .untracked:
             return "questionmark.circle.fill"
+        case .conflicted:
+            return "exclamationmark.triangle.fill"
         }
     }
 }
@@ -289,6 +301,23 @@ final class GitDiffPanel: Panel, ObservableObject {
 
     private nonisolated static func loadDiffSnapshot(directory: String, file: GitChangedFile, css: String, js: String) -> GitDiffSnapshot {
         let diffOutput = loadDiffOutput(directory: directory, file: file)
+
+        // Binary files produce "Binary files ... differ" instead of a
+        // unified diff. Detect this early and show a clean empty state.
+        if diffOutput.contains("Binary files") && diffOutput.contains("differ") {
+            let title = String(localized: "gitDiff.binaryFile.title", defaultValue: "Binary file")
+            let message = String(
+                localized: "gitDiff.binaryFile.message",
+                defaultValue: "Binary files cannot be displayed as a text diff."
+            )
+            let html = emptyStateHTML(
+                icon: "doc.fill",
+                title: title,
+                message: message
+            )
+            return GitDiffSnapshot(html: html, isTooLarge: false)
+        }
+
         let byteCount = diffOutput.lengthOfBytes(using: .utf8)
         if byteCount > Self.diffByteLimitValue {
             let title = String(localized: "gitDiff.diffTooLarge.title", defaultValue: "Diff too large")
@@ -322,6 +351,14 @@ final class GitDiffPanel: Panel, ObservableObject {
     }
 
     private nonisolated static func loadDiffOutput(directory: String, file: GitChangedFile) -> String {
+        if file.status == .conflicted {
+            // Show the working tree version with conflict markers against HEAD.
+            return runGitCommand(
+                directory: directory,
+                arguments: ["diff", "--", file.path]
+            ) ?? ""
+        }
+
         if file.status == .untracked {
             // git diff --no-index exits with 1 when files differ (always,
             // since we're comparing /dev/null to a real file). That's the
@@ -337,7 +374,14 @@ final class GitDiffPanel: Panel, ObservableObject {
         if file.staged {
             arguments.append("--cached")
         }
-        arguments.append(contentsOf: ["--", file.path])
+        // Enable rename detection and pass both old and new paths for
+        // renames so git shows the actual delta instead of full delete+add.
+        if file.status == .renamed, let oldPath = file.oldPath {
+            arguments.append("-M")
+            arguments.append(contentsOf: ["--", oldPath, file.path])
+        } else {
+            arguments.append(contentsOf: ["--", file.path])
+        }
         return runGitCommand(directory: directory, arguments: arguments) ?? ""
     }
 
@@ -353,6 +397,32 @@ final class GitDiffPanel: Panel, ObservableObject {
             let pathStart = line.index(line.startIndex, offsetBy: 3)
             let rawPath = String(line[pathStart...])
             let resolvedPath = normalizePorcelainPath(rawPath)
+
+            // For renames/copies, extract the old path from "old -> new".
+            let renameOldPath: String?
+            if let arrowRange = rawPath.range(of: " -> ", options: .backwards) {
+                renameOldPath = String(rawPath[rawPath.startIndex..<arrowRange.lowerBound])
+            } else {
+                renameOldPath = nil
+            }
+
+            // Merge conflicts: UU, AA, DD, AU, UA, DU, UD.
+            // Any line where either column is "U", or both are "A"/"D"
+            // during a merge, indicates a conflict. Show once as unstaged.
+            let isConflict = x == "U" || y == "U"
+                || (x == "A" && y == "A")
+                || (x == "D" && y == "D")
+            if isConflict {
+                files.append(
+                    GitChangedFile(
+                        id: "unstaged:\(resolvedPath)",
+                        path: resolvedPath,
+                        status: .conflicted,
+                        staged: false
+                    )
+                )
+                continue
+            }
 
             // Untracked (??) and ignored (!!) entries are not staged;
             // show them only once in the unstaged list.
@@ -376,7 +446,8 @@ final class GitDiffPanel: Panel, ObservableObject {
                         id: "staged:\(resolvedPath)",
                         path: resolvedPath,
                         status: status,
-                        staged: true
+                        staged: true,
+                        oldPath: renameOldPath
                     )
                 )
             }
@@ -387,7 +458,8 @@ final class GitDiffPanel: Panel, ObservableObject {
                         id: "unstaged:\(resolvedPath)",
                         path: resolvedPath,
                         status: status,
-                        staged: false
+                        staged: false,
+                        oldPath: renameOldPath
                     )
                 )
             }
@@ -417,6 +489,8 @@ final class GitDiffPanel: Panel, ObservableObject {
             return .copied
         case "?":
             return .untracked
+        case "U":
+            return .conflicted
         default:
             return nil
         }
