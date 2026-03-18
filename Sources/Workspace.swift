@@ -299,6 +299,7 @@ extension Workspace {
         let terminalSnapshot: SessionTerminalPanelSnapshot?
         let browserSnapshot: SessionBrowserPanelSnapshot?
         let markdownSnapshot: SessionMarkdownPanelSnapshot?
+        let gitDiffSnapshot: SessionGitDiffPanelSnapshot?
         switch panel.panelType {
         case .terminal:
             guard let terminalPanel = panel as? TerminalPanel else { return nil }
@@ -322,6 +323,7 @@ extension Workspace {
             )
             browserSnapshot = nil
             markdownSnapshot = nil
+            gitDiffSnapshot = nil
         case .browser:
             guard let browserPanel = panel as? BrowserPanel else { return nil }
             terminalSnapshot = nil
@@ -335,11 +337,19 @@ extension Workspace {
                 forwardHistoryURLStrings: historySnapshot.forwardHistoryURLStrings
             )
             markdownSnapshot = nil
+            gitDiffSnapshot = nil
         case .markdown:
             guard let mdPanel = panel as? MarkdownPanel else { return nil }
             terminalSnapshot = nil
             browserSnapshot = nil
             markdownSnapshot = SessionMarkdownPanelSnapshot(filePath: mdPanel.filePath)
+            gitDiffSnapshot = nil
+        case .gitDiff:
+            guard let gitDiffPanel = panel as? GitDiffPanel else { return nil }
+            terminalSnapshot = nil
+            browserSnapshot = nil
+            markdownSnapshot = nil
+            gitDiffSnapshot = SessionGitDiffPanelSnapshot(workingDirectory: gitDiffPanel.workingDirectory)
         }
 
         return SessionPanelSnapshot(
@@ -355,7 +365,8 @@ extension Workspace {
             ttyName: ttyName,
             terminal: terminalSnapshot,
             browser: browserSnapshot,
-            markdown: markdownSnapshot
+            markdown: markdownSnapshot,
+            gitDiff: gitDiffSnapshot
         )
     }
 
@@ -532,6 +543,17 @@ extension Workspace {
             }
             applySessionPanelMetadata(snapshot, toPanelId: markdownPanel.id)
             return markdownPanel.id
+        case .gitDiff:
+            let workingDirectory = snapshot.gitDiff?.workingDirectory ?? snapshot.directory ?? resolvedGitDiffWorkingDirectory()
+            guard let gitDiffPanel = newGitDiffSurface(
+                inPane: paneId,
+                workingDirectory: workingDirectory,
+                focus: false
+            ) else {
+                return nil
+            }
+            applySessionPanelMetadata(snapshot, toPanelId: gitDiffPanel.id)
+            return gitDiffPanel.id
         }
     }
 
@@ -1014,6 +1036,7 @@ final class Workspace: Identifiable, ObservableObject {
         static let terminal = "terminal"
         static let browser = "browser"
         static let markdown = "markdown"
+        static let gitDiff = "gitDiff"
     }
 
     enum PanelShellActivityState: String {
@@ -1389,6 +1412,30 @@ final class Workspace: Identifiable, ObservableObject {
         panelSubscriptions[markdownPanel.id] = subscription
     }
 
+    private func installGitDiffPanelSubscription(_ gitDiffPanel: GitDiffPanel) {
+        let subscription = gitDiffPanel.$displayTitle
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self, weak gitDiffPanel] newTitle in
+                guard let self = self,
+                      let gitDiffPanel = gitDiffPanel,
+                      let tabId = self.surfaceIdFromPanelId(gitDiffPanel.id) else { return }
+                guard let existing = self.bonsplitController.tab(tabId) else { return }
+
+                if self.panelTitles[gitDiffPanel.id] != newTitle {
+                    self.panelTitles[gitDiffPanel.id] = newTitle
+                }
+                let resolvedTitle = self.resolvedPanelTitle(panelId: gitDiffPanel.id, fallback: newTitle)
+                guard existing.title != resolvedTitle else { return }
+                self.bonsplitController.updateTab(
+                    tabId,
+                    title: resolvedTitle,
+                    hasCustomTitle: self.panelCustomTitles[gitDiffPanel.id] != nil
+                )
+            }
+        panelSubscriptions[gitDiffPanel.id] = subscription
+    }
+
     // MARK: - Panel Access
 
     func panel(for surfaceId: TabID) -> (any Panel)? {
@@ -1408,6 +1455,10 @@ final class Workspace: Identifiable, ObservableObject {
         panels[panelId] as? MarkdownPanel
     }
 
+    func gitDiffPanel(for panelId: UUID) -> GitDiffPanel? {
+        panels[panelId] as? GitDiffPanel
+    }
+
     private func surfaceKind(for panel: any Panel) -> String {
         switch panel.panelType {
         case .terminal:
@@ -1416,6 +1467,8 @@ final class Workspace: Identifiable, ObservableObject {
             return SurfaceKind.browser
         case .markdown:
             return SurfaceKind.markdown
+        case .gitDiff:
+            return SurfaceKind.gitDiff
         }
     }
 
@@ -2498,6 +2551,129 @@ final class Workspace: Identifiable, ObservableObject {
         installMarkdownPanelSubscription(markdownPanel)
 
         return markdownPanel
+    }
+
+    // MARK: - Git Diff Panel Creation
+
+    func newGitDiffSplit(
+        from panelId: UUID,
+        orientation: SplitOrientation,
+        insertFirst: Bool = false,
+        workingDirectory: String? = nil,
+        focus: Bool = true
+    ) -> GitDiffPanel? {
+        guard let sourceTabId = surfaceIdFromPanelId(panelId) else { return nil }
+        var sourcePaneId: PaneID?
+        for paneId in bonsplitController.allPaneIds {
+            let tabs = bonsplitController.tabs(inPane: paneId)
+            if tabs.contains(where: { $0.id == sourceTabId }) {
+                sourcePaneId = paneId
+                break
+            }
+        }
+
+        guard let paneId = sourcePaneId else { return nil }
+
+        let resolvedDirectory = workingDirectory ?? resolvedGitDiffWorkingDirectory(preferredPanelId: panelId)
+        let gitDiffPanel = GitDiffPanel(workspaceId: id, workingDirectory: resolvedDirectory)
+        panels[gitDiffPanel.id] = gitDiffPanel
+        panelTitles[gitDiffPanel.id] = gitDiffPanel.displayTitle
+
+        let newTab = Bonsplit.Tab(
+            title: gitDiffPanel.displayTitle,
+            icon: gitDiffPanel.displayIcon,
+            kind: SurfaceKind.gitDiff,
+            isDirty: gitDiffPanel.isDirty,
+            isLoading: false,
+            isPinned: false
+        )
+        surfaceIdToPanelId[newTab.id] = gitDiffPanel.id
+        let previousFocusedPanelId = focusedPanelId
+
+        isProgrammaticSplit = true
+        defer { isProgrammaticSplit = false }
+        guard bonsplitController.splitPane(paneId, orientation: orientation, withTab: newTab, insertFirst: insertFirst) != nil else {
+            surfaceIdToPanelId.removeValue(forKey: newTab.id)
+            panels.removeValue(forKey: gitDiffPanel.id)
+            panelTitles.removeValue(forKey: gitDiffPanel.id)
+            return nil
+        }
+
+        let previousHostedView = focusedTerminalPanel?.hostedView
+        if focus {
+            previousHostedView?.suppressReparentFocus()
+            focusPanel(gitDiffPanel.id)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                previousHostedView?.clearSuppressReparentFocus()
+            }
+        } else {
+            preserveFocusAfterNonFocusSplit(
+                preferredPanelId: previousFocusedPanelId,
+                splitPanelId: gitDiffPanel.id,
+                previousHostedView: previousHostedView
+            )
+        }
+
+        installGitDiffPanelSubscription(gitDiffPanel)
+
+        return gitDiffPanel
+    }
+
+    @discardableResult
+    func newGitDiffSurface(
+        inPane paneId: PaneID,
+        workingDirectory: String? = nil,
+        focus: Bool? = nil
+    ) -> GitDiffPanel? {
+        let shouldFocusNewTab = focus ?? (bonsplitController.focusedPaneId == paneId)
+        let resolvedDirectory = workingDirectory ?? resolvedGitDiffWorkingDirectory()
+
+        let gitDiffPanel = GitDiffPanel(workspaceId: id, workingDirectory: resolvedDirectory)
+        panels[gitDiffPanel.id] = gitDiffPanel
+        panelTitles[gitDiffPanel.id] = gitDiffPanel.displayTitle
+
+        guard let newTabId = bonsplitController.createTab(
+            title: gitDiffPanel.displayTitle,
+            icon: gitDiffPanel.displayIcon,
+            kind: SurfaceKind.gitDiff,
+            isDirty: gitDiffPanel.isDirty,
+            isLoading: false,
+            isPinned: false,
+            inPane: paneId
+        ) else {
+            panels.removeValue(forKey: gitDiffPanel.id)
+            panelTitles.removeValue(forKey: gitDiffPanel.id)
+            return nil
+        }
+
+        surfaceIdToPanelId[newTabId] = gitDiffPanel.id
+
+        if shouldFocusNewTab {
+            bonsplitController.focusPane(paneId)
+            bonsplitController.selectTab(newTabId)
+            applyTabSelection(tabId: newTabId, inPane: paneId)
+        }
+
+        installGitDiffPanelSubscription(gitDiffPanel)
+
+        return gitDiffPanel
+    }
+
+    private func resolvedGitDiffWorkingDirectory(preferredPanelId: UUID? = nil) -> String {
+        let trimmedCurrentDirectory = currentDirectory.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedCurrentDirectory.isEmpty {
+            return trimmedCurrentDirectory
+        }
+
+        let candidatePanelIds = [preferredPanelId, focusedPanelId, focusedTerminalPanel?.id].compactMap { $0 }
+        for panelId in candidatePanelIds {
+            let trimmed = panelDirectories[panelId]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+
+        return FileManager.default.homeDirectoryForCurrentUser.path
     }
 
     /// Tear down all panels in this workspace, freeing their Ghostty surfaces.
