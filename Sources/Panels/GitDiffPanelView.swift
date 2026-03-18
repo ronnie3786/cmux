@@ -212,6 +212,8 @@ struct GitDiffPanelView: View {
             return .orange
         case .deleted:
             return .red
+        case .conflicted:
+            return .yellow
         case .untracked:
             return .secondary
         }
