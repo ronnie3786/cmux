@@ -4433,6 +4433,8 @@ struct ContentView: View {
             return String(localized: "commandPalette.kind.browser", defaultValue: "Browser")
         case .markdown:
             return String(localized: "commandPalette.kind.markdown", defaultValue: "Markdown")
+        case .gitDiff:
+            return String(localized: "commandPalette.kind.gitDiff", defaultValue: "Git Changes")
         }
     }
 
@@ -4444,6 +4446,8 @@ struct ContentView: View {
             return ["browser", "web", "page"]
         case .markdown:
             return ["markdown", "note", "preview"]
+        case .gitDiff:
+            return ["git", "diff", "changes", "status"]
         }
     }
 
@@ -4512,6 +4516,8 @@ struct ContentView: View {
             return .newSurface
         case "palette.newBrowserTab":
             return .openBrowser
+        case "palette.openGitDiff":
+            return .openGitDiff
         case "palette.closeWindow":
             return .closeWindow
         case "palette.toggleSidebar":
@@ -5330,6 +5336,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.openGitDiff",
+                title: constant(String(localized: "command.openGitDiff.title", defaultValue: "Open Git Changes")),
+                subtitle: panelSubtitle,
+                keywords: ["git", "diff", "changes", "status"],
+                when: { $0.bool(CommandPaletteContextKeys.hasWorkspace) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.toggleSplitZoom",
                 title: constant(String(localized: "command.toggleSplitZoom.title", defaultValue: "Toggle Pane Zoom")),
                 subtitle: constant(String(localized: "command.toggleSplitZoom.subtitle", defaultValue: "Terminal Layout")),
@@ -5389,6 +5404,9 @@ struct ContentView: View {
             DispatchQueue.main.async {
                 _ = AppDelegate.shared?.openBrowserAndFocusAddressBar()
             }
+        }
+        registry.register(commandId: "palette.openGitDiff") {
+            _ = tabManager.openGitDiff(insertAtEnd: true)
         }
         registry.register(commandId: "palette.closeTab") {
             tabManager.closeCurrentPanelWithConfirmation()
