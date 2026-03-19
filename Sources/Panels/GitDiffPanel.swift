@@ -87,11 +87,36 @@ final class GitDiffPanel: Panel, ObservableObject {
     private var isClosed: Bool = false
     private let watchQueue = DispatchQueue(label: "com.cmux.git-diff-watch", qos: .utility)
 
+    /// Whether the panel is currently visible in the UI. When false,
+    /// file-system events are deferred until the panel becomes visible
+    /// again, avoiding wasted git process spawns and WebView renders.
+    private var isVisibleInPanel: Bool = true
+
+    /// Set when a refresh was skipped because the panel was hidden.
+    /// Checked when the panel becomes visible again.
+    private var needsRefreshOnVisible: Bool = false
+
+    /// Tracks the last set of changed file IDs so we can skip redundant
+    /// diff reloads when nothing actually changed.
+    private var lastChangedFileIDs: Set<String> = []
+
+    /// Simple diff output cache keyed on file ID. Cleared on each
+    /// status refresh since the underlying content may have changed.
+    private nonisolated(unsafe) var diffCache: [String: String] = [:]
+    private let diffCacheLock = NSLock()
+
+    /// Whether a status refresh is already in flight on the watch queue.
+    /// Prevents queueing duplicate refreshes while one is running.
+    private var isRefreshInFlight: Bool = false
+
     let workingDirectory: String
 
     private static let diffByteLimit = 500_000
     private nonisolated static let diffByteLimitValue = 500_000
-    private static let refreshDebounceDelay: TimeInterval = 0.2
+
+    // Debounce delay increased from 0.2s to 1.5s to prevent process
+    // spawn storms when coding agents are rapidly saving files.
+    private static let refreshDebounceDelay: TimeInterval = 1.5
 
     private static let diff2HTMLJavaScript: String = Diff2HtmlResources.javaScript
     private static let diff2HTMLCSS: String = Diff2HtmlResources.css
@@ -123,15 +148,47 @@ final class GitDiffPanel: Panel, ObservableObject {
         focusFlashToken += 1
     }
 
+    /// Called by the view layer when visibility changes (e.g. tab switch).
+    func setVisible(_ visible: Bool) {
+        let wasHidden = !isVisibleInPanel
+        isVisibleInPanel = visible
+        if visible && wasHidden && needsRefreshOnVisible {
+            needsRefreshOnVisible = false
+            refreshGitStatus()
+        }
+    }
+
     func refreshGitStatus() {
         guard !isClosed else { return }
+
+        // Skip refresh if the panel is not visible; mark for later.
+        guard isVisibleInPanel else {
+            needsRefreshOnVisible = true
+            return
+        }
+
+        // Don't queue a second refresh while one is already running.
+        guard !isRefreshInFlight else {
+            needsRefreshOnVisible = true
+            return
+        }
+
         isLoading = true
+        isRefreshInFlight = true
         let directory = workingDirectory
         watchQueue.async { [weak self] in
             let snapshot = Self.loadGitStatusSnapshot(directory: directory)
             DispatchQueue.main.async {
                 guard let self, !self.isClosed else { return }
+                self.isRefreshInFlight = false
                 self.applyGitStatusSnapshot(snapshot)
+
+                // If another refresh was requested while we were working,
+                // kick off a new one now.
+                if self.needsRefreshOnVisible && self.isVisibleInPanel {
+                    self.needsRefreshOnVisible = false
+                    self.refreshGitStatus()
+                }
             }
         }
     }
@@ -143,12 +200,40 @@ final class GitDiffPanel: Panel, ObservableObject {
             return
         }
 
+        // Check the diff cache first.
+        diffCacheLock.lock()
+        let cachedDiff = diffCache[file.id]
+        diffCacheLock.unlock()
+
+        if let cachedDiff {
+            let css = Self.diff2HTMLCSS
+            let js = Self.diff2HTMLJavaScript
+            // Build HTML on the background queue to keep main thread free.
+            watchQueue.async { [weak self] in
+                let snapshot = Self.buildDiffSnapshot(diffOutput: cachedDiff, css: css, js: js)
+                DispatchQueue.main.async {
+                    guard let self, !self.isClosed else { return }
+                    guard self.selectedFile == file else { return }
+                    self.diffHTML = snapshot.html
+                    self.isLoading = false
+                }
+            }
+            return
+        }
+
         isLoading = true
         let directory = workingDirectory
         let css = Self.diff2HTMLCSS
         let js = Self.diff2HTMLJavaScript
         watchQueue.async { [weak self] in
-            let snapshot = Self.loadDiffSnapshot(directory: directory, file: file, css: css, js: js)
+            let diffOutput = Self.loadDiffOutput(directory: directory, file: file)
+
+            // Store in cache.
+            self?.diffCacheLock.lock()
+            self?.diffCache[file.id] = diffOutput
+            self?.diffCacheLock.unlock()
+
+            let snapshot = Self.buildDiffSnapshot(diffOutput: diffOutput, css: css, js: js)
             DispatchQueue.main.async {
                 guard let self, !self.isClosed else { return }
                 guard self.selectedFile == file else { return }
@@ -161,7 +246,22 @@ final class GitDiffPanel: Panel, ObservableObject {
     private func applyGitStatusSnapshot(_ snapshot: GitStatusSnapshot) {
         isGitRepository = snapshot.isRepository
         branchName = snapshot.branchName
-        changedFiles = snapshot.changedFiles
+
+        // Invalidate the diff cache on every status refresh since the
+        // underlying file content may have changed.
+        diffCacheLock.lock()
+        diffCache.removeAll()
+        diffCacheLock.unlock()
+
+        // Check if the file list actually changed before updating.
+        let newIDs = Set(snapshot.changedFiles.map(\.id))
+        let filesChanged = newIDs != lastChangedFileIDs
+        lastChangedFileIDs = newIDs
+
+        if filesChanged {
+            changedFiles = snapshot.changedFiles
+        }
+
         updateWatchedPaths(gitDirectoryPath: snapshot.gitDirectoryPath)
 
         guard snapshot.isRepository else {
@@ -181,7 +281,14 @@ final class GitDiffPanel: Panel, ObservableObject {
         let currentSelection = selectedFile
         if let currentSelection,
            snapshot.changedFiles.contains(currentSelection) {
-            selectFile(currentSelection)
+            // Only reload the diff if the file list actually changed
+            // (meaning something was modified). If the list is identical,
+            // the currently displayed diff is still valid.
+            if filesChanged {
+                selectFile(currentSelection)
+            } else {
+                isLoading = false
+            }
         } else {
             selectFile(snapshot.changedFiles.first)
         }
@@ -299,9 +406,9 @@ final class GitDiffPanel: Panel, ObservableObject {
         )
     }
 
-    private nonisolated static func loadDiffSnapshot(directory: String, file: GitChangedFile, css: String, js: String) -> GitDiffSnapshot {
-        let diffOutput = loadDiffOutput(directory: directory, file: file)
-
+    /// Build a GitDiffSnapshot from raw diff output. Separated from
+    /// loadDiffOutput so cached diff strings can skip the git process.
+    private nonisolated static func buildDiffSnapshot(diffOutput: String, css: String, js: String) -> GitDiffSnapshot {
         // Binary files produce "Binary files ... differ" instead of a
         // unified diff. Detect this early and show a clean empty state.
         if diffOutput.contains("Binary files") && diffOutput.contains("differ") {
