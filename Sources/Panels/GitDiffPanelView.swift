@@ -40,6 +40,12 @@ struct GitDiffPanelView: View {
         .onChange(of: panel.focusFlashToken) { _ in
             triggerFocusFlashAnimation()
         }
+        .onChange(of: isVisibleInUI) { newValue in
+            panel.setVisible(newValue)
+        }
+        .onAppear {
+            panel.setVisible(isVisibleInUI)
+        }
     }
 
     private var leftColumn: some View {
