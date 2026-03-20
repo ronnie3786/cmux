@@ -269,38 +269,44 @@ private struct GitDiffWebContainerView: NSViewRepresentable {
 
     final class Coordinator: NSObject {
         var onPointerDown: () -> Void
-        let webView: GitDiffWebView
+        private var webView: GitDiffWebView?
         let containerView: NSView
         private var currentHTML: String = ""
 
         init(onPointerDown: @escaping () -> Void) {
             self.onPointerDown = onPointerDown
+            self.containerView = NSView(frame: .zero)
+            super.init()
+        }
+
+        private func makeWebViewIfNeeded() -> GitDiffWebView {
+            if let webView { return webView }
             let configuration = WKWebViewConfiguration()
             configuration.websiteDataStore = .nonPersistent()
             configuration.preferences.javaScriptCanOpenWindowsAutomatically = false
 
-            self.webView = GitDiffWebView(frame: .zero, configuration: configuration)
-            self.containerView = NSView(frame: .zero)
-            super.init()
-
-            webView.onPointerDown = { [weak self] in
+            let view = GitDiffWebView(frame: .zero, configuration: configuration)
+            view.onPointerDown = { [weak self] in
                 self?.onPointerDown()
             }
-            webView.translatesAutoresizingMaskIntoConstraints = false
-            webView.setValue(false, forKey: "drawsBackground")
-            containerView.addSubview(webView)
+            view.translatesAutoresizingMaskIntoConstraints = false
+            view.setValue(false, forKey: "drawsBackground")
+            containerView.addSubview(view)
             NSLayoutConstraint.activate([
-                webView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
-                webView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
-                webView.topAnchor.constraint(equalTo: containerView.topAnchor),
-                webView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+                view.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+                view.topAnchor.constraint(equalTo: containerView.topAnchor),
+                view.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
             ])
+            webView = view
+            return view
         }
 
         func updateHTML(_ html: String) {
+            guard !html.isEmpty else { return }
             guard html != currentHTML else { return }
             currentHTML = html
-            webView.loadHTMLString(html, baseURL: Bundle.main.resourceURL)
+            makeWebViewIfNeeded().loadHTMLString(html, baseURL: Bundle.main.resourceURL)
         }
     }
 }

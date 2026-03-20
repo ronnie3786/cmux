@@ -90,11 +90,13 @@ final class GitDiffPanel: Panel, ObservableObject {
     /// Whether the panel is currently visible in the UI. When false,
     /// file-system events are deferred until the panel becomes visible
     /// again, avoiding wasted git process spawns and WebView renders.
-    private var isVisibleInPanel: Bool = true
+    /// Starts as false so the first setVisible(true) triggers a refresh.
+    private var isVisibleInPanel: Bool = false
 
     /// Set when a refresh was skipped because the panel was hidden.
-    /// Checked when the panel becomes visible again.
-    private var needsRefreshOnVisible: Bool = false
+    /// Checked when the panel becomes visible again. Starts true so the
+    /// first setVisible(true) triggers the initial git status load.
+    private var needsRefreshOnVisible: Bool = true
 
     /// Tracks the last set of changed file IDs so we can skip redundant
     /// diff reloads when nothing actually changed.
@@ -118,15 +120,10 @@ final class GitDiffPanel: Panel, ObservableObject {
     // spawn storms when coding agents are rapidly saving files.
     private static let refreshDebounceDelay: TimeInterval = 1.5
 
-    private static let diff2HTMLJavaScript: String = Diff2HtmlResources.javaScript
-    private static let diff2HTMLCSS: String = Diff2HtmlResources.css
-
     init(workspaceId: UUID, workingDirectory: String) {
         self.id = UUID()
         self.workspaceId = workspaceId
         self.workingDirectory = workingDirectory
-
-        refreshGitStatus()
     }
 
     func focus() {
@@ -206,8 +203,8 @@ final class GitDiffPanel: Panel, ObservableObject {
         diffCacheLock.unlock()
 
         if let cachedDiff {
-            let css = Self.diff2HTMLCSS
-            let js = Self.diff2HTMLJavaScript
+            let css = Diff2HtmlResources.css
+            let js = Diff2HtmlResources.javaScript
             // Build HTML on the background queue to keep main thread free.
             watchQueue.async { [weak self] in
                 let snapshot = Self.buildDiffSnapshot(diffOutput: cachedDiff, css: css, js: js)
@@ -223,18 +220,19 @@ final class GitDiffPanel: Panel, ObservableObject {
 
         isLoading = true
         let directory = workingDirectory
-        let css = Self.diff2HTMLCSS
-        let js = Self.diff2HTMLJavaScript
+        let css = Diff2HtmlResources.css
+        let js = Diff2HtmlResources.javaScript
         watchQueue.async { [weak self] in
             let diffOutput = Self.loadDiffOutput(directory: directory, file: file)
 
             // Store in cache.
-            self?.diffCacheLock.lock()
-            self?.diffCache[file.id] = diffOutput
-            self?.diffCacheLock.unlock()
+            guard let self else { return }
+            self.diffCacheLock.lock()
+            self.diffCache[file.id] = diffOutput
+            self.diffCacheLock.unlock()
 
             let snapshot = Self.buildDiffSnapshot(diffOutput: diffOutput, css: css, js: js)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
                 guard let self, !self.isClosed else { return }
                 guard self.selectedFile == file else { return }
                 self.diffHTML = snapshot.html
