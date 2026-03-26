@@ -67,18 +67,68 @@ struct GitDiffPanelView: View {
             } else {
                 List(selection: selectedFileBinding) {
                     if !stagedFiles.isEmpty {
-                        Section(String(localized: "gitDiff.section.staged", defaultValue: "Staged")) {
+                        Section {
                             ForEach(stagedFiles) { file in
                                 fileRow(file)
                                     .tag(file)
+                                    .contextMenu {
+                                        Button {
+                                            panel.unstageFile(file)
+                                        } label: {
+                                            Label("Unstage File", systemImage: "minus.circle")
+                                        }
+                                    }
+                            }
+                        } header: {
+                            HStack {
+                                Text(String(localized: "gitDiff.section.staged", defaultValue: "Staged"))
+                                Spacer()
+                                Button {
+                                    panel.unstageAllFiles()
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Unstage All")
                             }
                         }
                     }
                     if !unstagedFiles.isEmpty {
-                        Section(String(localized: "gitDiff.section.unstaged", defaultValue: "Unstaged")) {
+                        Section {
                             ForEach(unstagedFiles) { file in
                                 fileRow(file)
                                     .tag(file)
+                                    .contextMenu {
+                                        if file.status == .conflicted {
+                                            Button {
+                                                panel.stageFile(file)
+                                            } label: {
+                                                Label("Stage File (Mark Resolved)", systemImage: "checkmark.circle")
+                                            }
+                                        } else {
+                                            Button {
+                                                panel.stageFile(file)
+                                            } label: {
+                                                Label("Stage File", systemImage: "plus.circle")
+                                            }
+                                        }
+                                    }
+                            }
+                        } header: {
+                            HStack {
+                                Text(String(localized: "gitDiff.section.unstaged", defaultValue: "Unstaged"))
+                                Spacer()
+                                Button {
+                                    panel.stageAllFiles()
+                                } label: {
+                                    Image(systemName: "plus.circle")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Stage All")
                             }
                         }
                     }

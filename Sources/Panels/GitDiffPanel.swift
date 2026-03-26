@@ -241,6 +241,48 @@ final class GitDiffPanel: Panel, ObservableObject {
         }
     }
 
+    func stageFile(_ file: GitChangedFile) {
+        let directory = workingDirectory
+        let path = file.path
+        watchQueue.async { [weak self] in
+            _ = Self.runGitCommand(directory: directory, arguments: ["add", "--", path])
+            DispatchQueue.main.async {
+                self?.refreshGitStatus()
+            }
+        }
+    }
+
+    func unstageFile(_ file: GitChangedFile) {
+        let directory = workingDirectory
+        let path = file.path
+        watchQueue.async { [weak self] in
+            _ = Self.runGitCommand(directory: directory, arguments: ["reset", "HEAD", "--", path])
+            DispatchQueue.main.async {
+                self?.refreshGitStatus()
+            }
+        }
+    }
+
+    func stageAllFiles() {
+        let directory = workingDirectory
+        watchQueue.async { [weak self] in
+            _ = Self.runGitCommand(directory: directory, arguments: ["add", "-A"])
+            DispatchQueue.main.async {
+                self?.refreshGitStatus()
+            }
+        }
+    }
+
+    func unstageAllFiles() {
+        let directory = workingDirectory
+        watchQueue.async { [weak self] in
+            _ = Self.runGitCommand(directory: directory, arguments: ["reset", "HEAD"])
+            DispatchQueue.main.async {
+                self?.refreshGitStatus()
+            }
+        }
+    }
+
     private func applyGitStatusSnapshot(_ snapshot: GitStatusSnapshot) {
         isGitRepository = snapshot.isRepository
         branchName = snapshot.branchName
